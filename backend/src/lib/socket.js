@@ -7,49 +7,71 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173"],
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
     credentials: true,
   },
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
-export function getReceiverSocketId(userId) {
-  return userSocketMap[userId];
-}
+// Store online users with their socket IDs
+const userSocketMap = new Map(); // {userId: socketId}
+const socketUserMap = new Map(); // {socketId: userId}
 
-// used to store online users
-const userSocketMap = {}; // {userId: socketId}
+export function getReceiverSocketId(userId) {
+  return userSocketMap.get(userId);
+}
 
 io.on("connection", (socket) => {
   console.log("A user connected", socket.id);
 
-  const userId = socket.handshake.query.userId;
-  if (userId) {
-    userSocketMap[userId] = socket.id;
-    console.log("User added to socket map:", userId, socket.id);
-  }
-
-  // io.emit() is used to send events to all the connected clients
-  io.emit("getOnlineUsers", Object.keys(userSocketMap));
-  console.log("Online users:", Object.keys(userSocketMap));
-
-  // Handle new message event
-  socket.on("newMessage", (message) => {
-    console.log("Received new message event:", message);
-    const receiverSocketId = getReceiverSocketId(message.receiverId);
-    if (receiverSocketId) {
-      io.to(receiverSocketId).emit("newMessage", message);
-      console.log("Message forwarded to receiver:", receiverSocketId);
+  // Handle user authentication
+  socket.on("authenticate", (userId) => {
+    if (userId) {
+      userSocketMap.set(userId, socket.id);
+      socketUserMap.set(socket.id, userId);
+      console.log("User authenticated:", userId, socket.id);
+      
+      // Broadcast updated online users list
+      io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
     }
   });
 
-  socket.on("disconnect", () => {
-    console.log("A user disconnected", socket.id);
-    if (userId) {
-      delete userSocketMap[userId];
-      console.log("User removed from socket map:", userId);
+  // Handle new message
+  socket.on("newMessage", (message) => {
+    try {
+      const receiverSocketId = getReceiverSocketId(message.receiverId);
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("newMessage", message);
+        console.log("Message forwarded to receiver:", receiverSocketId);
+      }
+    } catch (error) {
+      console.error("Error sending message:", error);
     }
-    io.emit("getOnlineUsers", Object.keys(userSocketMap));
-    console.log("Updated online users:", Object.keys(userSocketMap));
+  });
+
+  // Handle typing status
+  socket.on("typing", (data) => {
+    const receiverSocketId = getReceiverSocketId(data.receiverId);
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("typing", {
+        senderId: socketUserMap.get(socket.id),
+        isTyping: data.isTyping,
+      });
+    }
+  });
+
+  // Handle disconnection
+  socket.on("disconnect", () => {
+    const userId = socketUserMap.get(socket.id);
+    if (userId) {
+      userSocketMap.delete(userId);
+      socketUserMap.delete(socket.id);
+      console.log("User disconnected:", userId);
+      
+      // Broadcast updated online users list
+      io.emit("getOnlineUsers", Array.from(userSocketMap.keys()));
+    }
   });
 });
 
